@@ -1,0 +1,6 @@
+.git/
+/bin/
+/dist/
+.stagefreight/
+*.md
+docs/
