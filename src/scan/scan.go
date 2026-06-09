@@ -142,15 +142,31 @@ func ProbePod(ctx context.Context, namespace, name, probeImage string) ([]int, e
 // capture listeners (exported wrapper of the orphan criterion).
 func IsCaptured(present []int) bool { return isCaptured(present) }
 
-// probeListeners injects an ephemeral probe into the pod and reads its netns
-// /proc/net/tcp{,6}, returning which ztunnel in-pod ports are LISTENing.
+// probeListeners reads the pod's netns /proc/net/tcp{,6} and returns which ztunnel
+// in-pod ports are LISTENing.
+//
+// Fast path (no mess): exec `cat /proc/net/tcp` in the pod's OWN container —
+// every container in a pod shares the netns, so this reads the same sockets
+// without injecting anything. Only when that fails (distroless images with no
+// `cat`/shell) does it fall back to a baseline-safe ephemeral probe. Ephemeral
+// containers can never be removed, so avoiding them whenever possible is what
+// keeps a scan from littering completed mm-probe containers across the fleet.
 func probeListeners(ctx context.Context, p *corev1.Pod, image string) ([]int, error) {
+	cmd := []string{"cat", "/proc/net/tcp", "/proc/net/tcp6"}
+
+	// Fast path: the pod's own container (no ephemeral container injected).
+	if len(p.Spec.Containers) > 0 {
+		if res, err := k8s.ExecCommand(ctx, p.Name, p.Namespace, p.Spec.Containers[0].Name, cmd); err == nil {
+			return parseListenPorts(res.Stdout, ztunnelInPodPorts), nil
+		}
+	}
+
+	// Fallback: inject a baseline-safe ephemeral probe (distroless pods only).
 	probe, err := k8s.EnsureNetnsProbe(ctx, p.Namespace, p.Name, image)
 	if err != nil {
 		return nil, err
 	}
-	res, err := k8s.ExecCommand(ctx, p.Name, p.Namespace, probe,
-		[]string{"cat", "/proc/net/tcp", "/proc/net/tcp6"})
+	res, err := k8s.ExecCommand(ctx, p.Name, p.Namespace, probe, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("read /proc/net/tcp: %w", err)
 	}

@@ -1,6 +1,8 @@
-// Package repair re-enrolls ambient orphans by toggling the per-pod
-// istio.io/dataplane-mode label, forcing istio-cni to recreate the missing in-pod
-// ztunnel listeners without restarting the pod.
+// Package repair re-enrolls ambient orphans. The durable strategy is a pod
+// restart (fresh enrollment is unaffected by the istio-cni reconcile bug); the
+// gentle per-pod dataplane-mode toggle is offered as an opt-in, but on an
+// unstable mesh it can restore the in-pod sockets only transiently (they flap
+// back), so it is NOT the default.
 package repair
 
 import (
@@ -15,28 +17,35 @@ import (
 	"github.com/PrPlanIT/istio-meshmedic/src/scan"
 )
 
-// dataplaneModeLabel opts a single pod in/out of the ambient data plane,
-// overriding the namespace default. Setting it to "none" tears down the pod's
-// redirection; removing it lets the namespace default ("ambient") re-apply.
+// dataplaneModeLabel opts a single pod in/out of the ambient data plane.
 const dataplaneModeLabel = "istio.io/dataplane-mode"
+
+// Strategy selects how an orphan is re-enrolled.
+type Strategy string
+
+const (
+	// StrategyRestart deletes the pod so its controller recreates it with a fresh
+	// ambient enrollment. Durable — fresh enrollment is unaffected by the reconcile
+	// bug. The default.
+	StrategyRestart Strategy = "restart"
+	// StrategyToggle flips the per-pod dataplane-mode label off and back, asking
+	// istio-cni to re-enroll without a restart. Gentle, but the re-established
+	// sockets can flap on an unstable mesh — opt-in only.
+	StrategyToggle Strategy = "toggle"
+)
 
 // Result is the per-orphan outcome of a repair pass.
 type Result struct {
 	Pod    string `json:"pod"`
 	Node   string `json:"node"`
-	Action string `json:"action"` // would-repair | repaired | failed
+	Action string `json:"action"` // would-repair | restarted | repaired | failed
 	Detail string `json:"detail"`
 }
 
-// Repair finds orphans (via the same detector as scan) and, when apply is true,
-// re-enrolls each by toggling its istio.io/dataplane-mode label off ("none") and
-// back (removed → namespace default re-applies). That makes istio-cni tear down
-// and re-establish the pod's redirection — recreating the missing ztunnel
-// listeners — WITHOUT restarting the pod. It then re-probes to confirm.
-//
-// With apply=false it is a dry run: it reports what it WOULD repair, changing
-// nothing. candidates (behavioral pre-filter) and namespace scope are honored.
-func Repair(ctx context.Context, probeImage, namespace string, candidates map[string]bool, apply bool) ([]Result, error) {
+// Repair finds orphans (the same detector as scan) and, when apply is true,
+// re-enrolls each via the chosen strategy. With apply=false it is a dry run that
+// changes nothing. candidates (behavioral pre-filter) and namespace scope honored.
+func Repair(ctx context.Context, probeImage, namespace string, candidates map[string]bool, apply bool, strategy Strategy) ([]Result, error) {
 	report, err := scan.Scan(ctx, probeImage, namespace, candidates)
 	if err != nil {
 		return nil, err
@@ -46,30 +55,60 @@ func Repair(ctx context.Context, probeImage, namespace string, candidates map[st
 	for _, o := range report.Orphans {
 		key := o.Namespace + "/" + o.Name
 		if !apply {
-			results = append(results, Result{
-				Pod: key, Node: o.Node, Action: "would-repair",
-				Detail: "toggle dataplane-mode none→ambient (no restart)",
-			})
+			results = append(results, Result{Pod: key, Node: o.Node, Action: "would-repair", Detail: planDetail(strategy)})
 			continue
 		}
-
-		if err := toggleDataplaneMode(ctx, o.Namespace, o.Name); err != nil {
-			results = append(results, Result{Pod: key, Node: o.Node, Action: "failed", Detail: err.Error()})
-			continue
-		}
-		if present, ok := confirmHealed(ctx, o.Namespace, o.Name, probeImage); ok {
-			results = append(results, Result{
-				Pod: key, Node: o.Node, Action: "repaired",
-				Detail: fmt.Sprintf("listeners returned %v", present),
-			})
+		if strategy == StrategyToggle {
+			results = append(results, toggleRepair(ctx, o, probeImage))
 		} else {
-			results = append(results, Result{
-				Pod: key, Node: o.Node, Action: "failed",
-				Detail: "listeners did not return after toggle — a pod restart may be required",
-			})
+			results = append(results, restartRepair(ctx, o))
 		}
 	}
 	return results, nil
+}
+
+func planDetail(s Strategy) string {
+	if s == StrategyToggle {
+		return "toggle dataplane-mode (gentle, no restart — may only hold transiently)"
+	}
+	return "restart pod (fresh enrollment — durable)"
+}
+
+// restartRepair deletes the orphan pod; its controller recreates it with a fresh,
+// durable ambient enrollment. This is the reliable heal — the gentle toggle can
+// restore sockets only transiently on a flapping data plane.
+func restartRepair(ctx context.Context, o scan.Orphan) Result {
+	key := o.Namespace + "/" + o.Name
+	c := k8s.GetClients()
+	if c == nil {
+		return Result{Pod: key, Node: o.Node, Action: "failed", Detail: "kubernetes clients not initialized"}
+	}
+	if err := c.Clientset.CoreV1().Pods(o.Namespace).Delete(ctx, o.Name, metav1.DeleteOptions{}); err != nil {
+		return Result{Pod: key, Node: o.Node, Action: "failed", Detail: "delete: " + err.Error()}
+	}
+	return Result{
+		Pod: key, Node: o.Node, Action: "restarted",
+		Detail: "deleted — controller re-creates with a fresh enrollment (re-scan to confirm)",
+	}
+}
+
+// toggleRepair flips the dataplane-mode label off and back, then re-probes. Gentle
+// (no restart) but unreliable on an unstable mesh — the sockets may flap back.
+func toggleRepair(ctx context.Context, o scan.Orphan, probeImage string) Result {
+	key := o.Namespace + "/" + o.Name
+	if err := toggleDataplaneMode(ctx, o.Namespace, o.Name); err != nil {
+		return Result{Pod: key, Node: o.Node, Action: "failed", Detail: err.Error()}
+	}
+	if present, ok := confirmHealed(ctx, o.Namespace, o.Name, probeImage); ok {
+		return Result{
+			Pod: key, Node: o.Node, Action: "repaired",
+			Detail: fmt.Sprintf("listeners returned %v — verify it holds; use --strategy restart if it recurs", present),
+		}
+	}
+	return Result{
+		Pod: key, Node: o.Node, Action: "failed",
+		Detail: "listeners did not return — use the default restart strategy",
+	}
 }
 
 // toggleDataplaneMode opts the pod out of ambient (label "none" → istio-cni tears

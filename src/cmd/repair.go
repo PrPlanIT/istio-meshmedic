@@ -21,15 +21,20 @@ var (
 	repairYes        bool
 	repairProbeImage string
 	repairOutput     string
+	repairStrategy   string
 )
 
 var repairCmd = &cobra.Command{
 	Use:   "repair",
 	Short: "Re-enroll ambient orphans (gated; dry-run unless --yes)",
-	Long: `Finds ambient orphans (same detector as scan) and re-enrolls each by toggling
-the per-pod istio.io/dataplane-mode label off and back — forcing istio-cni to
-recreate the missing in-pod ztunnel listeners WITHOUT restarting the pod — then
-re-probes to confirm the capture returned.
+	Long: `Finds ambient orphans (same detector as scan) and re-enrolls each.
+
+Default strategy is a pod restart (--strategy restart): delete the pod so its
+controller recreates it with a fresh, durable enrollment — fresh enrollment is
+unaffected by the istio-cni reconcile bug. The gentle alternative (--strategy
+toggle) flips the per-pod istio.io/dataplane-mode label off and back without a
+restart, but on an unstable mesh the restored sockets can flap, so it is not the
+default.
 
 Dry-run by default: reports what it WOULD repair and changes nothing. Pass --yes
 to apply. Requires --namespace or --behavioral — it will not scan+repair the whole
@@ -60,7 +65,11 @@ cluster blindly.`,
 			}
 		}
 
-		results, err := repair.Repair(ctx, repairProbeImage, repairNamespace, candidates, repairYes)
+		strategy := repair.Strategy(repairStrategy)
+		if strategy != repair.StrategyRestart && strategy != repair.StrategyToggle {
+			return fmt.Errorf("invalid --strategy %q (use restart or toggle)", repairStrategy)
+		}
+		results, err := repair.Repair(ctx, repairProbeImage, repairNamespace, candidates, repairYes, strategy)
 		if err != nil {
 			return err
 		}
@@ -96,6 +105,8 @@ func printRepair(results []repair.Result, applied bool) {
 		switch r.Action {
 		case "repaired":
 			icon = "✓"
+		case "restarted":
+			icon = "↻"
 		case "failed":
 			icon = "✗"
 		}
@@ -108,6 +119,8 @@ func init() {
 	repairCmd.Flags().BoolVar(&repairBehavioral, "behavioral", false, "find orphans via ztunnel rejection logs first")
 	repairCmd.Flags().StringVar(&repairSince, "since", "15m", "ztunnel log window for --behavioral")
 	repairCmd.Flags().BoolVar(&repairYes, "yes", false, "apply the repair (default: dry-run)")
+	repairCmd.Flags().StringVar(&repairStrategy, "strategy", "restart",
+		"how to re-enroll: restart (durable, default) | toggle (gentle, may flap)")
 	repairCmd.Flags().StringVarP(&repairOutput, "output", "o", "table", "output format: table|json")
 	repairCmd.Flags().StringVar(&repairProbeImage, "probe-image", scan.DefaultProbeImage, "ephemeral netns probe image")
 	RootCmd.AddCommand(repairCmd)
