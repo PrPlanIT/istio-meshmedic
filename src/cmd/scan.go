@@ -15,6 +15,7 @@ import (
 var (
 	scanOutput     string
 	scanProbeImage string
+	scanNamespace  string
 )
 
 var scanCmd = &cobra.Command{
@@ -32,7 +33,7 @@ are found.`,
 		if _, err := k8s.Init(Kubeconfig); err != nil {
 			return err
 		}
-		report, err := scan.Scan(context.Background(), scanProbeImage)
+		report, err := scan.Scan(context.Background(), scanProbeImage, scanNamespace)
 		if err != nil {
 			return err
 		}
@@ -78,6 +79,8 @@ func printScanTable(r *scan.Report) {
 
 func init() {
 	scanCmd.Flags().StringVarP(&scanOutput, "output", "o", "table", "output format: table|json")
+	scanCmd.Flags().StringVarP(&scanNamespace, "namespace", "n", "",
+		"limit the scan to one namespace (default: all — probes every ambient pod)")
 	scanCmd.Flags().StringVar(&scanProbeImage, "probe-image", scan.DefaultProbeImage,
 		"image for the ephemeral netns probe (must be present on the node)")
 	RootCmd.AddCommand(scanCmd)

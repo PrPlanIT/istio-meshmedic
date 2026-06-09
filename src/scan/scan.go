@@ -55,7 +55,11 @@ type Report struct {
 // ztunnel's in-pod capture listeners (15001/15008). For each candidate it injects
 // a baseline-safe ephemeral probe and reads /proc/net/tcp{,6} from the pod's own
 // netns. Read-only with respect to mesh state (it does inject probe containers).
-func Scan(ctx context.Context, probeImage string) (*Report, error) {
+//
+// namespace scopes the scan; "" scans all namespaces. Because each candidate is
+// probed with an ephemeral container, scoping to one namespace keeps a scan cheap
+// and avoids injecting probes cluster-wide.
+func Scan(ctx context.Context, probeImage, namespace string) (*Report, error) {
 	c := k8s.GetClients()
 	if c == nil {
 		return nil, fmt.Errorf("kubernetes clients not initialized")
@@ -64,7 +68,7 @@ func Scan(ctx context.Context, probeImage string) (*Report, error) {
 		probeImage = DefaultProbeImage
 	}
 
-	pods, err := c.Clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	pods, err := c.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
