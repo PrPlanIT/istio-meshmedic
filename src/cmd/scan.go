@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -16,6 +17,8 @@ var (
 	scanOutput     string
 	scanProbeImage string
 	scanNamespace  string
+	scanBehavioral bool
+	scanSince      string
 )
 
 var scanCmd = &cobra.Command{
@@ -33,7 +36,30 @@ are found.`,
 		if _, err := k8s.Init(Kubeconfig); err != nil {
 			return err
 		}
-		report, err := scan.Scan(context.Background(), scanProbeImage, scanNamespace)
+		ctx := context.Background()
+
+		// Behavioral pre-filter: narrow to pods whose breakage showed up in
+		// ztunnel's rejection logs, so we probe a handful instead of every ambient
+		// pod. Nil candidates = probe all (the exhaustive netns sweep).
+		var candidates map[string]bool
+		if scanBehavioral {
+			since, err := time.ParseDuration(scanSince)
+			if err != nil {
+				return fmt.Errorf("invalid --since %q: %w", scanSince, err)
+			}
+			candidates, err = scan.BehavioralCandidates(ctx, int64(since.Seconds()))
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "behavioral pre-filter: %d candidate(s) from ztunnel logs (last %s)\n",
+				len(candidates), scanSince)
+			if len(candidates) == 0 {
+				fmt.Println("No orphan candidates in ztunnel logs — no active rejections in the window.")
+				return nil
+			}
+		}
+
+		report, err := scan.Scan(ctx, scanProbeImage, scanNamespace, candidates)
 		if err != nil {
 			return err
 		}
@@ -81,6 +107,9 @@ func init() {
 	scanCmd.Flags().StringVarP(&scanOutput, "output", "o", "table", "output format: table|json")
 	scanCmd.Flags().StringVarP(&scanNamespace, "namespace", "n", "",
 		"limit the scan to one namespace (default: all — probes every ambient pod)")
+	scanCmd.Flags().BoolVar(&scanBehavioral, "behavioral", false,
+		"pre-filter candidates from ztunnel rejection logs (cheap; probes only flagged pods)")
+	scanCmd.Flags().StringVar(&scanSince, "since", "15m", "ztunnel log window for --behavioral")
 	scanCmd.Flags().StringVar(&scanProbeImage, "probe-image", scan.DefaultProbeImage,
 		"image for the ephemeral netns probe (must be present on the node)")
 	RootCmd.AddCommand(scanCmd)

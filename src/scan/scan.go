@@ -59,7 +59,12 @@ type Report struct {
 // namespace scopes the scan; "" scans all namespaces. Because each candidate is
 // probed with an ephemeral container, scoping to one namespace keeps a scan cheap
 // and avoids injecting probes cluster-wide.
-func Scan(ctx context.Context, probeImage, namespace string) (*Report, error) {
+//
+// candidates, when non-nil, restricts probing to that set of "namespace/name"
+// pods — the behavioral pre-filter's output. With it, a cluster-wide scan probes
+// only the pods whose breakage showed up in ztunnel's logs (a handful) instead of
+// every ambient pod. Nil means probe every ambient Running+Ready pod in scope.
+func Scan(ctx context.Context, probeImage, namespace string, candidates map[string]bool) (*Report, error) {
 	c := k8s.GetClients()
 	if c == nil {
 		return nil, fmt.Errorf("kubernetes clients not initialized")
@@ -85,6 +90,9 @@ func Scan(ctx context.Context, probeImage, namespace string) (*Report, error) {
 			continue
 		}
 		key := p.Namespace + "/" + p.Name
+		if candidates != nil && !candidates[key] {
+			continue // behavioral pre-filter: only probe pods flagged by ztunnel logs
+		}
 
 		present, err := probeListeners(ctx, p, probeImage)
 		if err != nil {
@@ -111,6 +119,28 @@ func Scan(ctx context.Context, probeImage, namespace string) (*Report, error) {
 	})
 	return report, nil
 }
+
+// ProbePod fetches a pod by namespace/name and returns which ztunnel in-pod
+// listener ports are LISTENing in its netns. Used to re-probe a single pod after
+// a repair to confirm its capture returned.
+func ProbePod(ctx context.Context, namespace, name, probeImage string) ([]int, error) {
+	c := k8s.GetClients()
+	if c == nil {
+		return nil, fmt.Errorf("kubernetes clients not initialized")
+	}
+	if probeImage == "" {
+		probeImage = DefaultProbeImage
+	}
+	p, err := c.Clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return probeListeners(ctx, p, probeImage)
+}
+
+// IsCaptured reports whether the present ports include the required ztunnel
+// capture listeners (exported wrapper of the orphan criterion).
+func IsCaptured(present []int) bool { return isCaptured(present) }
 
 // probeListeners injects an ephemeral probe into the pod and reads its netns
 // /proc/net/tcp{,6}, returning which ztunnel in-pod ports are LISTENing.
