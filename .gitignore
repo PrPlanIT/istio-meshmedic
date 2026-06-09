@@ -1,5 +1,12 @@
+# StageFreight runtime artifacts (pipeline.json, reports/, security/, deps/,
+# dist/, cache/). Badges are committed (docs.commit), so keep that subdir.
+.stagefreight/*
+!.stagefreight/badges/
+
+# compiled binaries / build output
 /bin/
 /dist/
+*.exe
 *.test
 *.out
 .DS_Store
