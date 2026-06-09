@@ -1,0 +1,94 @@
+# meshmedic node-agent — one pod per node. Reads each local pod's netns sockets
+# straight from /host/proc (no ephemeral container injected) and detects ambient
+# orphans on a loop. Detect-only by default; set --auto-repair to restart stuck
+# pods (flap-guarded). hostPID + root are required to read other pods' netns via
+# /host/proc/<pid>/net/tcp; reading /proc/net/tcp needs no Linux capabilities.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meshmedic
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: meshmedic
+  namespace: meshmedic
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: meshmedic
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    # delete is needed only for --auto-repair (restart = delete; controller
+    # recreates with a fresh enrollment). Drop it for detect-only deployments.
+    verbs: ["get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: meshmedic
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: meshmedic
+subjects:
+  - kind: ServiceAccount
+    name: meshmedic
+    namespace: meshmedic
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: meshmedic-agent
+  namespace: meshmedic
+  labels:
+    app: meshmedic-agent
+spec:
+  selector:
+    matchLabels:
+      app: meshmedic-agent
+  template:
+    metadata:
+      labels:
+        app: meshmedic-agent
+        istio.io/dataplane-mode: none # keep meshmedic itself out of the ambient mesh
+    spec:
+      serviceAccountName: meshmedic
+      hostPID: true
+      containers:
+        - name: agent
+          image: cr.pcfae.com/prplanit/istio-meshmedic:latest-dev
+          args:
+            - agent
+            - --interval=60s
+            - --confirm=15s
+            - --auto-repair=false # flip to true to restart confirmed orphans
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+      tolerations:
+        - operator: Exists # run on every node, control-plane included

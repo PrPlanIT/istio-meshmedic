@@ -58,6 +58,14 @@ func parseListenPorts(procNet string, wanted []int) []int {
 	return out
 }
 
+// ListenersFromProcNet parses /proc/net/tcp{,6} content and returns which ztunnel
+// in-pod listener ports are LISTENing. Exported for the node-agent, which reads
+// the bytes straight from /host/proc/<pid>/net/tcp (no ephemeral container)
+// instead of exec-ing into the pod.
+func ListenersFromProcNet(procNet string) []int {
+	return parseListenPorts(procNet, ztunnelInPodPorts)
+}
+
 // isCaptured reports whether the present ports include all of the required
 // ambient-capture listeners.
 func isCaptured(present []int) bool {
