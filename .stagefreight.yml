@@ -25,7 +25,12 @@ versioning:
       base_from: [stable]
       format: "{base}-dev+{sha}"
   no_lineage:
-    mode: error
+    # No version tags yet: bootstrap dev builds from an explicit template (must
+    # contain {sha}). Detection then succeeds with the real commit SHA — which
+    # also means dev-{sha:8} resolves instead of falling back to "unknown". Once
+    # the first stable tag is cut, lineage takes over and this is unused.
+    mode: explicit
+    version: "0.1.0-dev+{sha}"
 
 builds:
   # Normal docker build (not crucible — crucible is StageFreight building itself).
