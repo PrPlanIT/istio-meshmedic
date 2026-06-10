@@ -137,6 +137,13 @@ build_cache:
     target: harbor-dev
     path: "cache"
     fallback: "main"
+  local:
+    # Match StageFreight's cap so the SHARED buildkitd cache on the runner stays
+    # bounded regardless of which project built last. Enforced by
+    # `buildx prune --keep-storage` after each successful build.
+    retention:
+      max_age: "7d"
+      max_size: "8GB"
 
 commit:
   default_type: docs
