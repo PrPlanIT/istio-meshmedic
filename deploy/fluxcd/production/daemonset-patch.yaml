@@ -1,0 +1,27 @@
+# Production standing policy: heal Ready orphans (capture lost on a healthy pod),
+# AND heal not-Ready orphans that remain orphaned past the grace period. The orphan
+# filter bounds churn — a pod that re-enrolls drops out of scope even if it stays
+# not-Ready for an app reason. Start detect-only (the base) and graduate to this
+# once you trust what it surfaces.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: istio-meshmedic
+  namespace: istio-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          # Production pins a released version — do NOT float on :latest-dev.
+          # Replace with the version you run.
+          image: docker.io/prplanit/istio-meshmedic:v0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - agent
+            - --interval=60s
+            - --confirm=15s
+            - --grace-period=5m
+            - --auto-repair=true
+            - --repair-stuck=true
+            - --metrics-addr=:9100

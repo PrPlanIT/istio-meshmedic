@@ -1,0 +1,11 @@
+# NOTE: this kustomization did not exist in the original concept — NOTES.md records
+# that the manifests were never wired into Flux. Added here only to make the base/
+# directory a valid kustomize base for the archive's base/prod layout. Nothing
+# deploys this; the concept was superseded before it shipped (see ../README.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - serviceaccount.yaml
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
+  - configmap-playbook.yaml

@@ -1,0 +1,9 @@
+# The production wiring this concept needed — a CronJob to run scan.yml on a
+# schedule, plus mutation RBAC for a remediation playbook (see ../base/NOTES.md
+# §§ B–C) — was NEVER built: the MeshMedic Go agent superseded it first. This
+# overlay exists only to preserve the base/prod layout; it adds nothing over base
+# and is not deployed. See ../README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base

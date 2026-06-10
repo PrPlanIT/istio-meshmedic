@@ -1,0 +1,472 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-spiffe-reconciler-playbooks
+data:
+  ansible.cfg: |
+    [defaults]
+    stdout_callback = default
+    display_skipped_hosts = false
+    display_ok_hosts = false
+    retry_files_enabled = false
+    gathering = explicit
+    host_key_checking = false
+    interpreter_python = auto_silent
+    # All user-facing output goes through the `debug` task in scan.yml which
+    # writes fenced blocks (---BEGIN JSON---, etc.). Play recaps and task
+    # banners must not pollute the machine-parseable sections.
+    callbacks_enabled =
+
+  inventory.yaml: |
+    all:
+      hosts:
+        localhost:
+          ansible_connection: local
+
+  # Core truth-gathering playbook. Read-only. Emits a stable JSON contract
+  # between ---BEGIN JSON--- / ---END JSON--- fences, followed by a human
+  # table and Prometheus text-format block. Exit code is always 0; per-node
+  # failures are isolated into the output, not propagated as job failures.
+  scan.yml: |
+    ---
+    - name: istio-spiffe-reconciler scan
+      hosts: localhost
+      connection: local
+      gather_facts: false
+
+      vars:
+        # Schema pins against Istio 1.29.1 ztunnel /config_dump. If the
+        # response shape changes, only these constants need updating and
+        # the playbook surfaces a ztunnel_parse_failure warning rather
+        # than crashing.
+        ambient_annotation_key: "ambient.istio.io/redirection"
+        ambient_annotation_value: "enabled"
+        ztunnel_namespace: "king-of-red-lions"
+        ztunnel_label_selector: "app=ztunnel"
+        ztunnel_admin_port: 15000
+        ztunnel_admin_path: "/config_dump"
+        # Pinned mapping: workloadState is the authoritative local-proxy
+        # registry, keyed by real K8s pod UID. This is the ONLY source for
+        # enrolled-on-this-node. `workloads[]` is cluster-wide xDS catalog
+        # and is NOT used for orphan detection.
+        mapping_mode: "uid"
+        schema_version: "1"
+
+      tasks:
+        - name: Record run timestamp
+          ansible.builtin.set_fact:
+            run_timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+        # -----------------------------------------------------------------
+        # 1. Expected set — ambient-enrolled pods cluster-wide
+        # -----------------------------------------------------------------
+        - name: List all pods cluster-wide
+          kubernetes.core.k8s_info:
+            kind: Pod
+          register: all_pods_raw
+
+        - name: Filter to ambient-enrolled pods
+          ansible.builtin.set_fact:
+            expected_pods: >-
+              {{
+                all_pods_raw.resources
+                | selectattr('metadata.annotations', 'defined')
+                | selectattr('metadata.annotations.' ~ ambient_annotation_key | replace('.', '\\.'), 'defined')
+                | list
+              }}
+          # NOTE: the annotation key contains a dot. Jinja selectattr can't
+          # traverse dotted keys directly, so we filter via the "when" below
+          # in a follow-up task rather than inline. Reassign.
+
+        - name: Build expected_pods via explicit iteration (dotted annotation safe)
+          ansible.builtin.set_fact:
+            expected_pods: >-
+              {{
+                all_pods_raw.resources
+                | map('combine', {})
+                | list
+                | selectattr('metadata.annotations', 'defined')
+                | list
+              }}
+
+        - name: Narrow expected_pods to those with the ambient annotation set to enabled
+          ansible.builtin.set_fact:
+            expected_pods: >-
+              {{
+                expected_pods
+                | rejectattr('metadata.annotations.' ~ ambient_annotation_key, 'undefined')
+                | selectattr('metadata.annotations.' ~ ambient_annotation_key, 'equalto', ambient_annotation_value)
+                | list
+              }}
+          # Jinja's dotted-attribute access DOES work for dict lookups when
+          # the key contains dots — treat as bracket access internally. The
+          # two-step build above is defensive against pods that have no
+          # annotations at all.
+
+        - name: Shape expected_pods into a normalized record list
+          ansible.builtin.set_fact:
+            expected_records: >-
+              {{
+                expected_pods | map('to_json') | map('from_json') | list
+                | map('community.general.json_query', '{namespace: metadata.namespace, name: metadata.name, uid: metadata.uid, node: spec.nodeName, sa: spec.serviceAccountName, creationTimestamp: metadata.creationTimestamp, ownerRefs: metadata.ownerReferences, volumes: spec.volumes, containerCount: spec.containers | length}')
+                | list
+              }}
+          # If community.general is unavailable, this task will fail loudly —
+          # acceptable because the playbook's runtime image (ansible-oci)
+          # ships the collection. Fallback shaping below is authoritative.
+
+        - name: Shape expected_pods via native filters (no json_query dependency)
+          ansible.builtin.set_fact:
+            expected_records: >-
+              {{
+                expected_records | default([])
+                if expected_records is defined and expected_records | length > 0
+                else
+                expected_pods | map('ansible.builtin.combine', {}) | list
+                | map('dict2items') | list
+                | map('items2dict') | list
+              }}
+          # The community.general step above is the primary path; this
+          # fallback block is a no-op when json_query succeeded. If it did
+          # not (filter absent), we retry via a simple loop in the next task.
+
+        - name: Normalize expected_records via explicit loop (portable)
+          ansible.builtin.set_fact:
+            expected_records: "{{ expected_records_loop }}"
+          vars:
+            expected_records_loop: >-
+              [
+              {% for p in expected_pods %}
+              {
+                "namespace": "{{ p.metadata.namespace }}",
+                "name": "{{ p.metadata.name }}",
+                "uid": "{{ p.metadata.uid }}",
+                "node": "{{ p.spec.nodeName | default('') }}",
+                "sa": "{{ p.spec.serviceAccountName | default('default') }}",
+                "creationTimestamp": "{{ p.metadata.creationTimestamp }}",
+                "controller_kind": "{{ (p.metadata.ownerReferences | default([{}]))[0].kind | default('') }}",
+                "has_pvc": {{ (p.spec.volumes | default([]) | selectattr('persistentVolumeClaim', 'defined') | list | length) > 0 }},
+                "container_count": {{ p.spec.containers | length }}
+              }{% if not loop.last %},{% endif %}
+              {% endfor %}
+              ]
+          # Single authoritative shaping pass. Previous `json_query` /
+          # `dict2items` experiments above are discarded — this is the
+          # record shape every downstream task uses.
+
+        - name: Parse expected_records as JSON (normalize types)
+          ansible.builtin.set_fact:
+            expected_records: "{{ expected_records | from_yaml }}"
+
+        # -----------------------------------------------------------------
+        # 2. Enrolled set — per-ztunnel, with failure isolation
+        # -----------------------------------------------------------------
+        - name: List ztunnel pods
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ ztunnel_namespace }}"
+            label_selectors:
+              - "{{ ztunnel_label_selector }}"
+          register: ztunnel_pods_raw
+
+        - name: Initialize per-node results
+          ansible.builtin.set_fact:
+            by_node_results: []
+            warnings_out: []
+
+        - name: Query each ztunnel's config_dump with error isolation
+          vars:
+            zt_name: "{{ item.metadata.name }}"
+            zt_node: "{{ item.spec.nodeName }}"
+          block:
+            - name: "Exec curl against ztunnel {{ zt_name }}"
+              ansible.builtin.command:
+                argv:
+                  - kubectl
+                  - exec
+                  - "-n"
+                  - "{{ ztunnel_namespace }}"
+                  - "{{ zt_name }}"
+                  - "--"
+                  - curl
+                  - "-sf"
+                  - "--max-time"
+                  - "5"
+                  - "localhost:{{ ztunnel_admin_port }}{{ ztunnel_admin_path }}"
+              register: zt_dump
+              changed_when: false
+              failed_when: false
+              timeout: 15
+
+            - name: "Parse config_dump from {{ zt_name }}"
+              ansible.builtin.set_fact:
+                zt_parsed: "{{ zt_dump.stdout | from_json }}"
+              when: zt_dump.rc == 0 and zt_dump.stdout is defined and zt_dump.stdout | length > 0
+
+            - name: "Validate workloadState presence on {{ zt_name }}"
+              ansible.builtin.set_fact:
+                zt_workload_uids: "{{ zt_parsed.workloadState.keys() | list }}"
+              when:
+                - zt_parsed is defined
+                - zt_parsed.workloadState is defined
+                - zt_parsed.workloadState | type_debug == 'dict'
+
+            - name: "Record success for {{ zt_name }}"
+              ansible.builtin.set_fact:
+                by_node_results: >-
+                  {{
+                    by_node_results + [{
+                      'node': zt_node,
+                      'ztunnel_pod': zt_name,
+                      'status': 'ok',
+                      'error': '',
+                      'enrolled_uids': zt_workload_uids
+                    }]
+                  }}
+              when: zt_workload_uids is defined
+
+            - name: "Record failure for {{ zt_name }} (no workloadState key)"
+              ansible.builtin.set_fact:
+                by_node_results: >-
+                  {{
+                    by_node_results + [{
+                      'node': zt_node,
+                      'ztunnel_pod': zt_name,
+                      'status': 'failed',
+                      'error': 'workloadState key missing or non-dict in config_dump response',
+                      'enrolled_uids': []
+                    }]
+                  }}
+                warnings_out: >-
+                  {{
+                    warnings_out + [{
+                      'kind': 'ztunnel_parse_failure',
+                      'node': zt_node,
+                      'detail': 'workloadState missing in /config_dump response from ' ~ zt_name
+                    }]
+                  }}
+              when: zt_workload_uids is not defined and (zt_dump.rc == 0)
+
+            - name: "Record failure for {{ zt_name }} (exec/curl failed)"
+              ansible.builtin.set_fact:
+                by_node_results: >-
+                  {{
+                    by_node_results + [{
+                      'node': zt_node,
+                      'ztunnel_pod': zt_name,
+                      'status': 'failed',
+                      'error': ('kubectl exec rc=' ~ zt_dump.rc ~ ': ' ~ (zt_dump.stderr | default('') | truncate(200))),
+                      'enrolled_uids': []
+                    }]
+                  }}
+                warnings_out: >-
+                  {{
+                    warnings_out + [{
+                      'kind': 'ztunnel_parse_failure',
+                      'node': zt_node,
+                      'detail': 'exec/curl failed rc=' ~ zt_dump.rc
+                    }]
+                  }}
+              when: zt_dump.rc != 0
+          loop: "{{ ztunnel_pods_raw.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+          # Reset per-iteration scratch vars so stale state from the
+          # previous ztunnel does not leak into the current record.
+          vars:
+            zt_parsed: null
+            zt_workload_uids: null
+
+        # -----------------------------------------------------------------
+        # 3. Cross-node sanity — every enrolled UID should map to one node
+        # -----------------------------------------------------------------
+        - name: Build flat list of (node, uid) tuples from successful queries
+          ansible.builtin.set_fact:
+            all_uid_node_pairs: >-
+              {{
+                by_node_results
+                | selectattr('status', 'equalto', 'ok')
+                | map(attribute='enrolled_uids')
+                | map('list')
+                | list
+              }}
+
+        - name: Detect cross-node enrollment (UID on >1 ztunnel)
+          vars:
+            uid_counts: {}
+          ansible.builtin.set_fact:
+            cross_node_warnings: "{{ cross_node_warnings_build }}"
+          vars:
+            cross_node_warnings_build: >-
+              [
+              {% set seen = {} %}
+              {% set dupes = [] %}
+              {% for r in by_node_results if r.status == 'ok' %}
+                {% for uid in r.enrolled_uids %}
+                  {% if uid in seen %}
+                    {% set _ = dupes.append({'uid': uid, 'nodes': [seen[uid], r.node]}) %}
+                  {% else %}
+                    {% set _ = seen.update({uid: r.node}) %}
+                  {% endif %}
+                {% endfor %}
+              {% endfor %}
+              {% for d in dupes %}
+              {"kind": "cross_node_enrollment", "detail": "uid {{ d.uid }} seen on nodes {{ d.nodes | join(',') }}"}{% if not loop.last %},{% endif %}
+              {% endfor %}
+              ]
+
+        - name: Parse cross_node_warnings as JSON
+          ansible.builtin.set_fact:
+            cross_node_warnings: "{{ cross_node_warnings | from_yaml }}"
+            warnings_out: "{{ warnings_out + (cross_node_warnings | from_yaml) }}"
+
+        # -----------------------------------------------------------------
+        # 4. Per-node diff — orphans = expected(node) − enrolled(node)
+        # -----------------------------------------------------------------
+        - name: Compute per-node diff
+          ansible.builtin.set_fact:
+            by_node: "{{ by_node_diff }}"
+            orphans: "{{ orphans_list }}"
+          vars:
+            by_node_diff: >-
+              [
+              {% for r in by_node_results %}
+              {% set exp_on_node = expected_records | selectattr('node', 'equalto', r.node) | list %}
+              {% set exp_uids = exp_on_node | map(attribute='uid') | list %}
+              {% set orph_uids = exp_uids | difference(r.enrolled_uids) if r.status == 'ok' else [] %}
+              {% set enrolled_count = r.enrolled_uids | length %}
+              {% set expected_count = exp_uids | length %}
+              {
+                "node": "{{ r.node }}",
+                "ztunnel_pod": "{{ r.ztunnel_pod }}",
+                "ztunnel_query": {
+                  "status": "{{ r.status }}",
+                  "error": "{{ r.error | replace('"', '\\"') }}",
+                  "mapping_mode": "{{ mapping_mode }}"
+                },
+                "expected": {{ expected_count }},
+                "enrolled": {{ enrolled_count }},
+                "orphans": {{ orph_uids | length if r.status == 'ok' else 0 }},
+                "unknown": {{ expected_count if r.status != 'ok' else 0 }},
+                "enrollment_ratio": {{ (enrolled_count / expected_count) if (expected_count > 0 and r.status == 'ok') else 1.0 }}
+              }{% if not loop.last %},{% endif %}
+              {% endfor %}
+              ]
+            orphans_list: >-
+              [
+              {% set ns = namespace(first=true) %}
+              {% for r in by_node_results if r.status == 'ok' %}
+                {% set exp_on_node = expected_records | selectattr('node', 'equalto', r.node) | list %}
+                {% for p in exp_on_node if p.uid not in r.enrolled_uids %}
+                {% if not ns.first %},{% endif %}{% set ns.first = false %}
+                {
+                  "namespace": "{{ p.namespace }}",
+                  "name": "{{ p.name }}",
+                  "uid": "{{ p.uid }}",
+                  "node": "{{ p.node }}",
+                  "sa": "{{ p.sa }}",
+                  "controller_kind": "{{ p.controller_kind }}",
+                  "has_pvc": {{ p.has_pvc | lower }},
+                  "container_count": {{ p.container_count }},
+                  "pod_age_seconds": {{ ((run_timestamp | to_datetime('%Y-%m-%dT%H:%M:%SZ')) - (p.creationTimestamp | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() | int }},
+                  "orphan_detected_at": "{{ run_timestamp }}"
+                }
+                {% endfor %}
+              {% endfor %}
+              ]
+
+        - name: Parse by_node and orphans as JSON
+          ansible.builtin.set_fact:
+            by_node: "{{ by_node | from_yaml }}"
+            orphans: "{{ orphans | from_yaml }}"
+
+        # -----------------------------------------------------------------
+        # 5. Snapshot checksum + summary
+        # -----------------------------------------------------------------
+        - name: Compute snapshot_id (sha256 of sorted sets)
+          ansible.builtin.set_fact:
+            snapshot_id: "sha256:{{ snapshot_input | hash('sha256') }}"
+          vars:
+            snapshot_input: >-
+              {{ (expected_records | map(attribute='uid') | sort | join(',')) ~
+                 '|' ~
+                 (by_node_results | selectattr('status','equalto','ok') | map(attribute='enrolled_uids') | map('sort') | map('join',',') | sort | join(';')) }}
+
+        - name: Build summary
+          ansible.builtin.set_fact:
+            summary:
+              nodes_total: "{{ by_node | length }}"
+              nodes_ok: "{{ by_node | selectattr('ztunnel_query.status', 'equalto', 'ok') | list | length }}"
+              nodes_query_failed: "{{ by_node | selectattr('ztunnel_query.status', 'equalto', 'failed') | list | length }}"
+              expected_total: "{{ expected_records | length }}"
+              enrolled_total: "{{ by_node | sum(attribute='enrolled') }}"
+              orphan_total: "{{ by_node | sum(attribute='orphans') }}"
+              unknown_total: "{{ by_node | sum(attribute='unknown') }}"
+
+        # -----------------------------------------------------------------
+        # 6. Output — JSON first, then human table, then Prometheus block
+        # -----------------------------------------------------------------
+        - name: Emit JSON block (first, guaranteed valid)
+          ansible.builtin.debug:
+            msg: "{{ json_block.split('\n') }}"
+          vars:
+            final_doc:
+              schema_version: "{{ schema_version }}"
+              timestamp: "{{ run_timestamp }}"
+              snapshot_id: "{{ snapshot_id }}"
+              summary: "{{ summary }}"
+              by_node: "{{ by_node }}"
+              orphans: "{{ orphans }}"
+              warnings: "{{ warnings_out }}"
+            json_block: |
+              ---BEGIN JSON---
+              {{ final_doc | to_nice_json }}
+              ---END JSON---
+
+        - name: Emit human table
+          ansible.builtin.debug:
+            msg: "{{ table_lines }}"
+          vars:
+            header: "NODE                     NAMESPACE                      POD                                                      CONTROLLER        PVC    AGE(s)"
+            divider: "---------------------------------------------------------------------------------------------------------------------------------------"
+            rows: >-
+              {{
+                orphans | map('ansible.builtin.combine', {})
+                | list
+              }}
+            table_lines: >-
+              {{
+                ['---BEGIN TABLE---', header, divider]
+                + (orphans | map('ansible.builtin.combine', {}) | list
+                   | map('string') | list)
+                + ['---END TABLE---']
+              }}
+
+        - name: Emit Prometheus text-format block
+          ansible.builtin.debug:
+            msg: "{{ prom_lines }}"
+          vars:
+            per_node_expected: >-
+              {{
+                by_node | map('ansible.builtin.combine', {}) | list
+                | map('string') | list
+              }}
+            prom_lines: >-
+              {{
+                ['---BEGIN PROM---',
+                 '# HELP ambient_expected_workload_count Ambient-annotated pods expected per node',
+                 '# TYPE ambient_expected_workload_count gauge']
+                + (by_node | map(attribute='node') | zip(by_node | map(attribute='expected')) | list
+                   | map('join', ' ') | map('regex_replace', '^(\\S+) (\\S+)$', 'ambient_expected_workload_count{node=\"\\1\"} \\2') | list)
+                + ['# HELP ambient_ztunnel_workload_count Pods with active ztunnel proxy per node',
+                   '# TYPE ambient_ztunnel_workload_count gauge']
+                + (by_node | map(attribute='node') | zip(by_node | map(attribute='enrolled')) | list
+                   | map('join', ' ') | map('regex_replace', '^(\\S+) (\\S+)$', 'ambient_ztunnel_workload_count{node=\"\\1\"} \\2') | list)
+                + ['# HELP ambient_orphan_total Ambient pods missing from ztunnel',
+                   '# TYPE ambient_orphan_total gauge',
+                   'ambient_orphan_total ' ~ (summary.orphan_total | string),
+                   '# HELP ambient_snapshot_info Snapshot identifier',
+                   '# TYPE ambient_snapshot_info gauge',
+                   'ambient_snapshot_info{snapshot_id=\"' ~ snapshot_id ~ '\"} 1',
+                   '---END PROM---']
+              }}
