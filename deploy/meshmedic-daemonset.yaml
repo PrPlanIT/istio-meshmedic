@@ -54,6 +54,10 @@ spec:
       labels:
         app: meshmedic-agent
         istio.io/dataplane-mode: none # keep meshmedic itself out of the ambient mesh
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: meshmedic
       hostPID: true
@@ -64,12 +68,18 @@ spec:
             - agent
             - --interval=60s
             - --confirm=15s
-            - --auto-repair=false # flip to true to restart confirmed orphans
+            - --grace-period=5m
+            - --auto-repair=false  # restart Ready orphans (capture lost on a healthy pod)
+            - --repair-stuck=false # restart not-Ready orphans stuck orphaned past --grace-period
+            - --metrics-addr=:9100
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 9100
           volumeMounts:
             - name: host-proc
               mountPath: /host/proc
