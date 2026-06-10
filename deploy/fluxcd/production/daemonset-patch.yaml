@@ -14,8 +14,7 @@ spec:
       containers:
         - name: agent
           # Production pins a released version — do NOT float on :latest-dev.
-          # Replace with the version you run.
-          image: docker.io/prplanit/istio-meshmedic:v0.1.0
+          image: docker.io/prplanit/istio-meshmedic:v0.0.1
           imagePullPolicy: IfNotPresent
           args:
             - agent

@@ -4,6 +4,13 @@
 **Istio ambient-mesh enrollment orphans**: workloads that *should* be captured by
 their node's ztunnel but aren't.
 
+<!-- sf:project:start -->
+<!-- sf:project:end -->
+<!-- sf:badges:start -->
+<!-- sf:badges:end -->
+<!-- sf:image:start -->
+<!-- sf:image:end -->
+
 ## The problem it solves
 
 In Istio **ambient** mode, every pod's traffic is redirected to its node's
@@ -70,7 +77,7 @@ container:
 
 ```sh
 docker run --rm --network host --user "$(id -u):$(id -g)" -v "$HOME/.kube:/kube:ro" \
-  docker.io/prplanit/istio-meshmedic:latest-dev \
+  docker.io/prplanit/istio-meshmedic:v0.0.1 \
   scan --kubeconfig /kube/config -n <namespace>
 ```
 

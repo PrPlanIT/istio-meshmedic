@@ -63,11 +63,10 @@ spec:
       hostPID: true
       containers:
         - name: agent
-          # latest-dev is a rolling DEV tag — fine for evaluating meshmedic, but
-          # NOT recommended for production; pin a released version (e.g. :v0.1.0)
-          # with imagePullPolicy: IfNotPresent for production.
-          image: docker.io/prplanit/istio-meshmedic:latest-dev
-          imagePullPolicy: Always
+          # v0.0.1 is the first released version (pinned + IfNotPresent). To track
+          # the rolling DEV build instead, use :latest-dev with pullPolicy: Always.
+          image: docker.io/prplanit/istio-meshmedic:v0.0.1
+          imagePullPolicy: IfNotPresent
           args:
             - agent
             - --interval=60s

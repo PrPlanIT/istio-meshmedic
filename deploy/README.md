@@ -16,10 +16,11 @@ Self-contained: creates a `meshmedic` namespace, RBAC, and the DaemonSet in
 and serves `/metrics` but changes nothing. Good for a first look. Flip the
 `--auto-repair` / `--repair-stuck` args once you trust it (see below).
 
-> **Image tags:** the bundled manifests reference `:latest-dev`, a rolling dev tag
-> — fine for evaluation, **not recommended for production.** For production, pin a
-> released version (e.g. `:v0.1.0`) with `imagePullPolicy: IfNotPresent`; the
-> `deploy/fluxcd/production` overlay shows exactly this.
+> **Image tags:** the standalone manifest pins `:v0.0.1` (the first release) with
+> `imagePullPolicy: IfNotPresent`. The `deploy/fluxcd/base` overlay tracks the
+> rolling `:latest-dev` dev tag, and `deploy/fluxcd/production` pins `:v0.0.1` —
+> the base/overlay split showing the dev-vs-pinned pattern. Never float production
+> on `:latest-dev`.
 
 ## 2. Flux / Kustomize — `deploy/fluxcd/`
 
