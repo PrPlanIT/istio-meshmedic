@@ -34,6 +34,13 @@ var (
 		Name: "meshmedic_orphans_repaired_total",
 		Help: "Cumulative orphan repairs (restarts), by class.",
 	}, []string{"class"}) // class = ready | stuck
+	confirmTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "meshmedic_confirm_total",
+		Help: "Flap-guard re-check outcomes by result. Phase-1 observability: which " +
+			"branch of the confirm re-read fires before a repair is (not) taken. " +
+			"still_orphan leads to repair; proc_error/pid_missing are UNKNOWN (not " +
+			"recovered) yet currently still suppress repair; captured is a genuine recovery.",
+	}, []string{"result"}) // result = still_orphan | proc_error | pid_missing | captured
 	sweepsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "meshmedic_sweeps_total",
 		Help: "Cumulative completed sweeps.",

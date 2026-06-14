@@ -208,17 +208,40 @@ func classify(orphans []Orphan, grace time.Duration) (ready, notReady, stuck int
 	return ready, notReady, stuck
 }
 
-// stillOrphan re-reads a pod's listeners after the confirm delay — the flap guard.
-func stillOrphan(uid, hostProc string) bool {
+// confirmReason explains the flap-guard re-check outcome.
+//
+// Phase-1 observability: the caller logs + counts this, but behavior is UNCHANGED —
+// only confirmStillOrphan leads to a repair; every other result still skips, exactly
+// as the old bool did. The point is to learn WHICH branch actually fires in production
+// (a read error vs. transient PID churn vs. a genuine re-capture) before changing the
+// confirmation logic — because today the design's real flaw is that "couldn't verify"
+// (proc_error / pid_missing) and "recovered" (captured) collapse into one skip, so
+// uncertainty silently suppresses repairs.
+type confirmReason string
+
+const (
+	confirmStillOrphan confirmReason = "still_orphan" // re-read agrees: uncaptured orphan → repair
+	confirmProcError   confirmReason = "proc_error"   // /host/proc unreadable — UNKNOWN, not recovered
+	confirmPIDMissing  confirmReason = "pid_missing"  // pod PID absent this instant — UNKNOWN, not recovered
+	confirmCaptured    confirmReason = "captured"     // ztunnel capture present now — genuine recovery
+)
+
+// confirmOrphan re-reads a pod's listeners after the confirm delay — the flap guard.
+// The checks are byte-for-byte what stillOrphan did; only the return type changed
+// (bool → reason) so the caller can attribute the skip.
+func confirmOrphan(uid, hostProc string) confirmReason {
 	pids, err := mapPodPIDs(hostProc)
 	if err != nil {
-		return false
+		return confirmProcError
 	}
 	pid, ok := pids[uid]
 	if !ok {
-		return false
+		return confirmPIDMissing
 	}
-	return !scan.IsCaptured(readListeners(hostProc, pid))
+	if scan.IsCaptured(readListeners(hostProc, pid)) {
+		return confirmCaptured
+	}
+	return confirmStillOrphan
 }
 
 // Run is the continuous agent loop.
@@ -280,8 +303,14 @@ func Run(ctx context.Context, opts Options, logf func(string, ...any)) error {
 			if e := sleepCtx(ctx, opts.Confirm); e != nil {
 				return e
 			}
-			if !stillOrphan(o.UID, opts.HostProc) {
-				logf("  %s/%s recovered before repair (flap) — skipping", o.Namespace, o.Name)
+			reason := confirmOrphan(o.UID, opts.HostProc)
+			confirmTotal.WithLabelValues(string(reason)).Inc()
+			if reason != confirmStillOrphan {
+				// Phase 1: still skip on every non-"still_orphan" result (behavior
+				// unchanged), but record WHICH reason — so we learn whether repairs are
+				// suppressed by a genuine recovery (captured) or by an inconclusive
+				// re-read (proc_error / pid_missing) before we change the logic.
+				logf("  %s/%s not repaired (confirm=%s) — skipping", o.Namespace, o.Name, reason)
 				continue
 			}
 			class := "ready"
