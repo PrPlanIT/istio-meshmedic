@@ -163,32 +163,6 @@ dependency:
     push: true
     skip_ci: false
 
-docs:
-  enabled: true
-  generators:
-    badges: true
-    reference_docs: true
-    narrator: true
-    docker_readme: true
-  commit:
-    enabled: true
-    type: docs
-    message: "refresh generated docs and badges"
-    add:
-      - "README.md"
-      - "docs/modules"
-      - "docs/reference"
-      - ".stagefreight/badges"
-    push: true
-    # StageFreight's own docs are project metadata, not build inputs (the image
-    # is built from src/ only — README/docs are never copied in), so the docs
-    # auto-commit is synchronization output, not new source intent. Marking it
-    # skip-ci keeps it from entering the lifecycle and spawning a follow-up
-    # pipeline that auto-cancels the narrate which produced it. (Repos that ship docs IN
-    # the image — e.g. FAIRER-pages — keep this false: there a docs change is a
-    # real build input.) Broader X-StageFreight-Generated-keyed policy is TODO.
-    skip_ci: true
-
 lint:
   level: full
   modules:
@@ -250,8 +224,8 @@ toolchains:
     kubectl:
       version: "1.34.2"
 
-badges:
-  items:
+narrate:
+  badges:
     - id: build
       text: build
       value: "{env:BUILD_STATUS}"
@@ -321,228 +295,244 @@ badges:
       color: "#555"
       output: ".stagefreight/badges/dev-size.svg"
       link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev"
+  patches:
+    - file: "README.md"
+      items:
+        - id: badge.build
+          kind: badge_ref
+          ref: build
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
 
-narrator:
-  - file: "README.md"
-    items:
-      - id: badge.build
-        kind: badge_ref
-        ref: build
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
+        - id: badge.license
+          kind: badge_ref
+          ref: license
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
 
-      - id: badge.license
-        kind: badge_ref
-        ref: license
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
+        - id: badge.release
+          kind: badge_ref
+          ref: release
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
 
-      - id: badge.release
-        kind: badge_ref
-        ref: release
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
+        - id: badge.updated
+          kind: badge_ref
+          ref: updated
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
 
-      - id: badge.updated
-        kind: badge_ref
-        ref: updated
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
+        - id: shield.donate
+          kind: shield
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
+          shield: "badge/donate-FF5E5B?logo=ko-fi&logoColor=white"
+          link: "https://ko-fi.com/T6T41IT163"
 
-      - id: shield.donate
-        kind: shield
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
-        shield: "badge/donate-FF5E5B?logo=ko-fi&logoColor=white"
-        link: "https://ko-fi.com/T6T41IT163"
+        - id: shield.sponsor
+          kind: shield
+          placement:
+            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+            mode: replace
+            inline: true
+          shield: "badge/sponsor-EA4AAA?logo=githubsponsors&logoColor=white"
+          link: "https://github.com/sponsors/{var:github_org}"
 
-      - id: shield.sponsor
-        kind: shield
-        placement:
-          between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-          mode: replace
-          inline: true
-        shield: "badge/sponsor-EA4AAA?logo=githubsponsors&logoColor=white"
-        link: "https://github.com/sponsors/{var:github_org}"
+        # ── Project section (repo health & sources) ─────────────────
+        - id: project.github
+          kind: shield
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          shield: "badge/GitHub-source-181717?logo=github"
+          link: "https://github.com/{var:github_org}/{var:github_repo}"
 
-      # ── Project section (repo health & sources) ─────────────────
-      - id: project.github
-        kind: shield
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        shield: "badge/GitHub-source-181717?logo=github"
-        link: "https://github.com/{var:github_org}/{var:github_repo}"
+        - id: project.gitlab
+          kind: shield
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          shield: "badge/GitLab-source-FC6D26?logo=gitlab"
+          link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}"
 
-      - id: project.gitlab
-        kind: shield
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        shield: "badge/GitLab-source-FC6D26?logo=gitlab"
-        link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}"
+        - id: project.go-report
+          kind: props
+          type: go-report-card
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          params:
+            module: "github.com/{var:github_org}/{var:github_repo}"
 
-      - id: project.go-report
-        kind: props
-        type: go-report-card
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        params:
-          module: "github.com/{var:github_org}/{var:github_repo}"
+        - id: project.go-reference
+          kind: props
+          type: go-reference
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          params:
+            module: "github.com/{var:github_org}/{var:github_repo}"
 
-      - id: project.go-reference
-        kind: props
-        type: go-reference
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        params:
-          module: "github.com/{var:github_org}/{var:github_repo}"
+        - id: project.last-commit
+          kind: props
+          type: github-last-commit
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          params:
+            repo: "{var:github_org}/{var:github_repo}"
 
-      - id: project.last-commit
-        kind: props
-        type: github-last-commit
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        params:
-          repo: "{var:github_org}/{var:github_repo}"
+        - id: project.issues-open
+          kind: props
+          type: github-issues-open
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          params:
+            repo: "{var:github_org}/{var:github_repo}"
 
-      - id: project.issues-open
-        kind: props
-        type: github-issues-open
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        params:
-          repo: "{var:github_org}/{var:github_repo}"
+        - id: project.prs-open
+          kind: shield
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          shield: "github/issues-pr/{var:github_org}/{var:github_repo}"
 
-      - id: project.prs-open
-        kind: shield
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        shield: "github/issues-pr/{var:github_org}/{var:github_repo}"
+        - id: project.contributors
+          kind: props
+          type: github-contributors
+          placement:
+            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+            mode: replace
+            inline: true
+          params:
+            repo: "{var:github_org}/{var:github_repo}"
 
-      - id: project.contributors
-        kind: props
-        type: github-contributors
-        placement:
-          between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-          mode: replace
-          inline: true
-        params:
-          repo: "{var:github_org}/{var:github_repo}"
+        # ── Image section (multi-row with breaks) ─────────────────────
+        # Row 1: Docker image + pulls
+        - id: image.docker
+          kind: shield
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
+          shield: "badge/Docker-{var:org}%2F{var:repo}-2496ED?logo=docker&logoColor=white"
+          link: "https://hub.docker.com/r/{var:org}/{var:repo}"
 
-      # ── Image section (multi-row with breaks) ─────────────────────
-      # Row 1: Docker image + pulls
-      - id: image.docker
-        kind: shield
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
-        shield: "badge/Docker-{var:org}%2F{var:repo}-2496ED?logo=docker&logoColor=white"
-        link: "https://hub.docker.com/r/{var:org}/{var:repo}"
+        - id: image.pulls
+          kind: badge_ref
+          ref: pulls
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.pulls
-        kind: badge_ref
-        ref: pulls
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        - id: image.break1
+          kind: break
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.break1
-        kind: break
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        # Row 2: All tag badges (release + dev)
+        - id: image.release-latest
+          kind: badge_ref
+          ref: release-latest
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      # Row 2: All tag badges (release + dev)
-      - id: image.release-latest
-        kind: badge_ref
-        ref: release-latest
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        - id: image.release-updated
+          kind: badge_ref
+          ref: release-updated
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.release-updated
-        kind: badge_ref
-        ref: release-updated
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        - id: image.release-size
+          kind: badge_ref
+          ref: release-size
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.release-size
-        kind: badge_ref
-        ref: release-size
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        # Dev badges (same row)
+        - id: image.dev-latest
+          kind: badge_ref
+          ref: dev-latest
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      # Dev badges (same row)
-      - id: image.dev-latest
-        kind: badge_ref
-        ref: dev-latest
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        - id: image.dev-updated
+          kind: badge_ref
+          ref: dev-updated
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.dev-updated
-        kind: badge_ref
-        ref: dev-updated
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        - id: image.dev-size
+          kind: badge_ref
+          ref: dev-size
+          placement:
+            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+            mode: replace
 
-      - id: image.dev-size
-        kind: badge_ref
-        ref: dev-size
-        placement:
-          between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-          mode: replace
+        # ── Image contents (from manifest inventory) ──────────────────
+        - id: contents.base
+          kind: build-contents
+          build: meshmedic
+          section: inventories.versions
+          renderer: badges
+          placement:
+            between: ["<!-- sf:contents-base:start -->", "<!-- sf:contents-base:end -->"]
+            mode: replace
 
-      # ── Image contents (from manifest inventory) ──────────────────
-      - id: contents.base
-        kind: build-contents
-        build: meshmedic
-        section: inventories.versions
-        renderer: badges
-        placement:
-          between: ["<!-- sf:contents-base:start -->", "<!-- sf:contents-base:end -->"]
-          mode: replace
+        - id: contents.apk
+          kind: build-contents
+          build: meshmedic
+          section: inventories.apk
+          renderer: badges
+          placement:
+            between: ["<!-- sf:contents-apk:start -->", "<!-- sf:contents-apk:end -->"]
+            mode: replace
 
-      - id: contents.apk
-        kind: build-contents
-        build: meshmedic
-        section: inventories.apk
-        renderer: badges
-        placement:
-          between: ["<!-- sf:contents-apk:start -->", "<!-- sf:contents-apk:end -->"]
-          mode: replace
-
-  - file: "docs/reference/CLI.md"
-    items:
-      - id: cli-reference
-        kind: include
-        path: docs/modules/cli-reference.md
-        placement:
-          between: ["<!-- sf:cli-reference:start -->", "<!-- sf:cli-reference:end -->"]
-          mode: replace
+    - file: "docs/reference/CLI.md"
+      items:
+        - id: cli-reference
+          kind: include
+          path: docs/modules/cli-reference.md
+          placement:
+            between: ["<!-- sf:cli-reference:start -->", "<!-- sf:cli-reference:end -->"]
+            mode: replace
+  commit:
+    type: docs
+    message: "refresh generated docs and badges"
+    add:
+      - "README.md"
+      - "docs/modules"
+      - "docs/reference"
+      - ".stagefreight/badges"
+    push: true
+    # StageFreight's own docs are project metadata, not build inputs (the image
+    # is built from src/ only — README/docs are never copied in), so the docs
+    # auto-commit is synchronization output, not new source intent. Marking it
+    # skip-ci keeps it from entering the lifecycle and spawning a follow-up
+    # pipeline that auto-cancels the narrate which produced it. (Repos that ship docs IN
+    # the image — e.g. FAIRER-pages — keep this false: there a docs change is a
+    # real build input.) Broader X-StageFreight-Generated-keyed policy is TODO.
+    skip_ci: true
