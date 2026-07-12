@@ -50,6 +50,7 @@ audition:
     - stagefreight ci run audition
   artifacts:
     paths: [.stagefreight/]
+    when: always
     expire_in: 1 week
   allow_failure: true
 
@@ -79,7 +80,9 @@ review:
   script:
     - stagefreight ci run review
   artifacts:
-    paths: [.stagefreight/security/]
+    paths:
+      - .stagefreight/security/
+      - .stagefreight/pipeline.json
     expire_in: 1 week
   allow_failure: true
 
