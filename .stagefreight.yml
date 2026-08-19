@@ -3,9 +3,20 @@ version: 1
 ci:
   image: docker.cr.pcfae.com/prplanit/stagefreight:latest-dev
 
-matchers:
+git:
   branches:
     main: "^main$"
+  tags:
+    stable:     { pattern: "^v?\\d+\\.\\d+\\.\\d+$" }
+    prerelease: { pattern: "^v?\\d+\\.\\d+\\.\\d+-.+" }
+  versioning:
+    branch_builds:
+      default: { base_from: [stable], format: "{base}-dev+{sha}" }
+    no_lineage:
+      # No version tags yet: bootstrap dev builds from an explicit template (must
+      # contain {sha}). Switch to `mode: error` once the first stable tag is cut.
+      mode: explicit
+      version: "0.1.0-dev+{sha}"
 
 vars:
   org: prplanit
@@ -14,43 +25,26 @@ vars:
   repo: istio-meshmedic
   github_repo: istio-meshmedic
 
-versioning:
-  tag_sources:
-    - id: stable
-      pattern: "^v?\\d+\\.\\d+\\.\\d+$"
-    - id: prerelease
-      pattern: "^v?\\d+\\.\\d+\\.\\d+-.+"
-  branch_builds:
-    - id: default
-      base_from: [stable]
-      format: "{base}-dev+{sha}"
-  no_lineage:
-    # No version tags yet: bootstrap dev builds from an explicit template (must
-    # contain {sha}). Detection then succeeds with the real commit SHA — which
-    # also means dev-{sha:8} resolves instead of falling back to "unknown". Once
-    # the first stable tag is cut, lineage takes over and this is unused.
-    mode: explicit
-    version: "0.1.0-dev+{sha}"
-
 builds:
-  # Normal docker build (not crucible — crucible is StageFreight building itself).
-  - id: meshmedic
+  # meshmedic — Go CLI + node-agent DaemonSet, single scratch image from the repo's
+  # own Dockerfile (multi-stage; Go binary, CGO disabled).
+  meshmedic:
     kind: docker
     platforms: [linux/amd64]
 
 forges:
-  - id: gitlab
+  gitlab:
     provider: gitlab
     url: "https://gitlab.prplanit.com"
     credentials: GITLAB
 
-  - id: github
+  github:
     provider: github
     url: "https://github.com"
     credentials: GITHUB
 
 repos:
-  - id: primary
+  primary:
     forge: gitlab
     project: "{var:gitlab_group}/{var:repo}"
     roles: [primary]
@@ -58,7 +52,7 @@ repos:
       default: main
     worktree: "."
 
-  - id: github-mirror
+  github-mirror:
     forge: github
     project: "{var:github_org}/{var:github_repo}"
     roles: [mirror, publish-origin]
@@ -67,39 +61,39 @@ repos:
       releases: true
 
 registries:
-  - id: dockerhub
+  dockerhub:
     provider: docker
     url: docker.io
     credentials: DOCKER
     default_path: "{var:org}/{var:repo}"
 
-  - id: harbor
+  harbor:
     provider: harbor
     url: cr.pcfae.com
     credentials: HARBOR
     default_path: "{var:org}/{var:repo}"
 
-targets:
-  # ── Docker Hub: stable releases ─────────────────────────────────
-  - id: dockerhub-stable
+publish:
+  # ── Stable releases → all registries ──
+  stable:
     kind: registry
-    registry: dockerhub
+    registry: [dockerhub, harbor]
     build: meshmedic
     tags: ["v{version}", "latest"]
     when: { git_tags: [stable], events: [tag] }
 
-  # ── Docker Hub: pre-releases (alpha/beta/rc) ────────────────────
-  - id: dockerhub-prerelease
+  # ── Pre-releases ──
+  prerelease:
     kind: registry
-    registry: dockerhub
+    registry: [dockerhub, harbor]
     build: meshmedic
     tags: ["v{version}"]
     when: { git_tags: [prerelease], events: [tag] }
 
-  # ── Docker Hub: dev builds on every commit ───────────────────────
-  - id: dockerhub-dev
+  # ── Dev builds on every commit → all registries (retained/pruned) ──
+  dev:
     kind: registry
-    registry: dockerhub
+    registry: [dockerhub, harbor]
     build: meshmedic
     tags: ["dev-{sha:8}", "latest-dev"]
     when: { branches: [main], events: [push] }
@@ -107,40 +101,32 @@ targets:
       keep_last: 6
       protect: ["latest-dev"]
 
-  # ── Harbor: dev builds on every commit ──────────────────────────
-  - id: harbor-dev
-    kind: registry
-    registry: harbor
-    build: meshmedic
-    tags: ["dev-{sha:8}", "latest-dev"]
-    when: { branches: [main], events: [push] }
-
-  # ── Harbor: stable releases ─────────────────────────────────
-  - id: harbor-stable
-    kind: registry
-    registry: harbor
-    build: meshmedic
-    tags: ["v{version}", "latest"]
-    when: { git_tags: [stable], events: [tag] }
-
-  # ── Docker Hub: README sync ──────────────────────────────────────
-  - id: dockerhub-readme
-    kind: docker-readme
-    registry: dockerhub
+  # ── Project metadata: registry overviews + forge repos ──
+  project-metadata:
+    kind: metadata
+    registry: [dockerhub, harbor]
+    repos: [primary, github-mirror]
+    readme: README.md
+    description:
+      - "A Go CLI and node-agent DaemonSet that detects and heals Istio ambient-mesh enrollment orphans."
+    topics: [istio, ambient-mesh, kubernetes, daemonset, go, service-mesh]
     when: { branches: [main], events: [push, tag] }
-    file: "README.md"
-    description: "Detect and heal Istio ambient-mesh enrollment orphans"
+
+  # ── Release (gitlab primary; projects to github via github-mirror sync.releases) ──
+  release:
+    kind: release
+    type: latest
+    repos: [primary]
+    aliases: ["v{version}", "latest"]
+    when: { git_tags: [stable], events: [tag] }
 
 build_cache:
   mode: hybrid
   external:
-    target: harbor-dev
+    registry: harbor
     path: "cache"
     fallback: "main"
   local:
-    # Match StageFreight's cap so the SHARED buildkitd cache on the runner stays
-    # bounded regardless of which project built last. Enforced by
-    # `buildx prune --keep-storage` after each successful build.
     retention:
       max_age: "7d"
       max_size: "8GB"
@@ -165,17 +151,20 @@ dependency:
 
 lint:
   level: full
+  exclude:
+    - "*.png"
+    - "*.svg"
+    - "*.ico"
   modules:
     freshness:
       enabled: true
-      options:
-        cache_ttl: 300
-        sources:
-          docker_images: true
-          github_releases: true
-          go_modules: true
-        vulnerability:
-          enabled: true
+      cache_ttl: 300
+      sources:
+        docker_images: true
+        github_releases: true
+        go_modules: true
+      vulnerability:
+        enabled: true
     tabs:
       enabled: true
     secrets:
@@ -188,17 +177,13 @@ lint:
       enabled: true
     unicode:
       enabled: true
-      options:
-        # Unicode / invisible text defense — see docs/Linter.md § Unicode
-        # No allowlist needed: banner art is build-generated with escaped
-        # string literals (no raw control bytes in source).
-        detect_bidi: true
-        detect_zero_width: true
-        detect_control_ascii: true
+      detect_bidi: true
+      detect_zero_width: true
+      detect_control_ascii: true
 
 release:
   enabled: true
-  security_summary: ".stagefreight/security"
+  security_summary: true
   registry_links: true
 
 security:
@@ -208,331 +193,60 @@ security:
   release_detail: full
 
 toolchains:
-  desired:
-    trivy:
-      version: "0.69.3"
-    syft:
-      version: "1.42.3"
-    grype:
-      version: "0.110.0"
-    osv-scanner:
-      version: "2.3.5"
-    cosign:
-      version: "3.0.6"
-    flux:
-      version: "2.8.3"
-    kubectl:
-      version: "1.34.2"
+  trivy: "0.69.3"
+  syft: "1.42.3"
+  grype: "0.110.0"
+  osv-scanner: "2.3.5"
+  cosign: "3.0.6"
 
-narrate:
-  badges:
-    - id: build
-      text: build
-      value: "{env:BUILD_STATUS}"
-      color: auto
-      font: monofur
-      output: ".stagefreight/badges/build.svg"
-      link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}/-/pipelines"
-    - id: license
-      text: license
-      value: "AGPL-3.0-only"
-      color: "#310937"
-      font: monofur
-      output: ".stagefreight/badges/license.svg"
-      link: LICENSE
-    - id: release
-      text: release
-      value: "v{base}"
-      color: "#74ecbe"
-      font: dejavu-sans
-      font_size: 11
-      output: ".stagefreight/badges/release.svg"
-      link: "https://github.com/{var:github_org}/{var:github_repo}/releases"
-    - id: updated
-      text: updated
-      value: "{env:BUILD_DATE}"
-      color: "#236144"
-      font: dejavu-sans
-      font_size: 11
-      output: ".stagefreight/badges/updated.svg"
-    - id: pulls
-      text: pulls
-      value: "{docker.pulls}"
-      color: "#1d63ed"
-      output: ".stagefreight/badges/pulls.svg"
-      link: "https://hub.docker.com/r/{var:org}/{var:repo}"
-    - id: release-latest
-      text: latest
-      value: "v{base}"
-      color: "#74ecbe"
-      output: ".stagefreight/badges/latest.svg"
-      link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest"
-    - id: release-updated
-      text: updated
-      value: "{docker.tag.v{base}.updated}"
-      color: "#236144"
-      output: ".stagefreight/badges/release-updated.svg"
-    - id: release-size
-      text: size
-      value: "{docker.tag.v{base}.size}"
-      color: "#555"
-      output: ".stagefreight/badges/release-size.svg"
-      link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=v{base}"
-    - id: dev-latest
-      text: latest-dev
-      value: "dev-{sha:8}"
-      color: "#3b82f6"
-      output: ".stagefreight/badges/latest-dev.svg"
-      link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev"
-    - id: dev-updated
-      text: updated
-      value: "{docker.tag.latest-dev.updated}"
-      color: "#236144"
-      output: ".stagefreight/badges/dev-updated.svg"
-    - id: dev-size
-      text: size
-      value: "{docker.tag.latest-dev.size}"
-      color: "#555"
-      output: ".stagefreight/badges/dev-size.svg"
-      link: "https://hub.docker.com/r/{var:org}/{var:repo}/tags?name=latest-dev"
-  patches:
-    - file: "README.md"
-      items:
-        - id: badge.build
-          kind: badge_ref
-          ref: build
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
+# stencils: define each renderable once (id → stencil def). Inline defs render a
+# badge (default) or a shield (render: shield); named producers render via type.
+stencils:
+  # ── generated badges ──
+  build:          { label: build,      message: "{env:BUILD_STATUS}", color: auto, font: monofur, link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}/-/pipelines" }
+  license:        { label: license,    message: "AGPL-3.0-only", color: "#310937", font: monofur, link: LICENSE }
+  release:        { label: release,    message: "v{base}", color: "#74ecbe", font: dejavu-sans, font_size: 11, link: "https://github.com/{var:github_org}/{var:github_repo}/releases" }
+  updated:        { label: updated,    message: "{env:BUILD_DATE}", color: "#236144", font: dejavu-sans, font_size: 11 }
+  pulls:          { label: pulls,      message: "{docker.pulls}", color: "#1d63ed", link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
 
-        - id: badge.license
-          kind: badge_ref
-          ref: license
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
+  # ── inline shields ──
+  donate:  { render: shield, message: donate,  color: "#FF5E5B", logo: ko-fi,          logo_color: white, link: "https://ko-fi.com/T6T41IT163" }
+  sponsor: { render: shield, message: sponsor, color: "#EA4AAA", logo: githubsponsors, logo_color: white, link: "https://github.com/sponsors/{var:github_org}" }
+  github:  { render: shield, label: GitHub, message: source, color: "#181717", logo: github, link: "https://github.com/{var:github_org}/{var:github_repo}" }
+  gitlab:  { render: shield, label: GitLab, message: source, color: "#FC6D26", logo: gitlab, link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}" }
+  docker:  { render: shield, label: Docker, message: "{var:org}/{var:repo}", color: "#2496ED", logo: docker, logo_color: white, link: "https://hub.docker.com/r/{var:org}/{var:repo}" }
 
-        - id: badge.release
-          kind: badge_ref
-          ref: release
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
+  # ── named producers (repo resolves from repos: publish-origin) ──
+  go-report:    { type: goreportcard }
+  last-commit:  { type: github-last-commit }
+  issues-open:  { type: github-issues-open }
+  prs-open:     { type: github-prs-open }
+  contributors: { type: github-contributors }
 
-        - id: badge.updated
-          kind: badge_ref
-          ref: updated
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
+scribe:
+  files:
+    readme.badges:
+      file: "README.md"
+      between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
+      inline: true
+      items: [build, license, release, updated, donate, sponsor]
 
-        - id: shield.donate
-          kind: shield
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
-          shield: "badge/donate-FF5E5B?logo=ko-fi&logoColor=white"
-          link: "https://ko-fi.com/T6T41IT163"
+    readme.project:
+      file: "README.md"
+      between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
+      inline: true
+      items: [github, gitlab, go-report, last-commit, issues-open, prs-open, contributors]
 
-        - id: shield.sponsor
-          kind: shield
-          placement:
-            between: ["<!-- sf:badges:start -->", "<!-- sf:badges:end -->"]
-            mode: replace
-            inline: true
-          shield: "badge/sponsor-EA4AAA?logo=githubsponsors&logoColor=white"
-          link: "https://github.com/sponsors/{var:github_org}"
+    readme.image:
+      file: "README.md"
+      between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
+      items: [docker, pulls]
 
-        # ── Project section (repo health & sources) ─────────────────
-        - id: project.github
-          kind: shield
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          shield: "badge/GitHub-source-181717?logo=github"
-          link: "https://github.com/{var:github_org}/{var:github_repo}"
-
-        - id: project.gitlab
-          kind: shield
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          shield: "badge/GitLab-source-FC6D26?logo=gitlab"
-          link: "https://gitlab.prplanit.com/{var:gitlab_group}/{var:repo}"
-
-        - id: project.go-report
-          kind: props
-          type: go-report-card
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          params:
-            module: "github.com/{var:github_org}/{var:github_repo}"
-
-        - id: project.go-reference
-          kind: props
-          type: go-reference
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          params:
-            module: "github.com/{var:github_org}/{var:github_repo}"
-
-        - id: project.last-commit
-          kind: props
-          type: github-last-commit
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          params:
-            repo: "{var:github_org}/{var:github_repo}"
-
-        - id: project.issues-open
-          kind: props
-          type: github-issues-open
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          params:
-            repo: "{var:github_org}/{var:github_repo}"
-
-        - id: project.prs-open
-          kind: shield
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          shield: "github/issues-pr/{var:github_org}/{var:github_repo}"
-
-        - id: project.contributors
-          kind: props
-          type: github-contributors
-          placement:
-            between: ["<!-- sf:project:start -->", "<!-- sf:project:end -->"]
-            mode: replace
-            inline: true
-          params:
-            repo: "{var:github_org}/{var:github_repo}"
-
-        # ── Image section (multi-row with breaks) ─────────────────────
-        # Row 1: Docker image + pulls
-        - id: image.docker
-          kind: shield
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-          shield: "badge/Docker-{var:org}%2F{var:repo}-2496ED?logo=docker&logoColor=white"
-          link: "https://hub.docker.com/r/{var:org}/{var:repo}"
-
-        - id: image.pulls
-          kind: badge_ref
-          ref: pulls
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        - id: image.break1
-          kind: break
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        # Row 2: All tag badges (release + dev)
-        - id: image.release-latest
-          kind: badge_ref
-          ref: release-latest
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        - id: image.release-updated
-          kind: badge_ref
-          ref: release-updated
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        - id: image.release-size
-          kind: badge_ref
-          ref: release-size
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        # Dev badges (same row)
-        - id: image.dev-latest
-          kind: badge_ref
-          ref: dev-latest
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        - id: image.dev-updated
-          kind: badge_ref
-          ref: dev-updated
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        - id: image.dev-size
-          kind: badge_ref
-          ref: dev-size
-          placement:
-            between: ["<!-- sf:image:start -->", "<!-- sf:image:end -->"]
-            mode: replace
-
-        # ── Image contents (from manifest inventory) ──────────────────
-        - id: contents.base
-          kind: build-contents
-          build: meshmedic
-          section: inventories.versions
-          renderer: badges
-          placement:
-            between: ["<!-- sf:contents-base:start -->", "<!-- sf:contents-base:end -->"]
-            mode: replace
-
-        - id: contents.apk
-          kind: build-contents
-          build: meshmedic
-          section: inventories.apk
-          renderer: badges
-          placement:
-            between: ["<!-- sf:contents-apk:start -->", "<!-- sf:contents-apk:end -->"]
-            mode: replace
-
-    - file: "docs/reference/CLI.md"
-      items:
-        - id: cli-reference
-          kind: include
-          path: docs/modules/cli-reference.md
-          placement:
-            between: ["<!-- sf:cli-reference:start -->", "<!-- sf:cli-reference:end -->"]
-            mode: replace
   commit:
     type: docs
     message: "refresh generated docs and badges"
     add:
       - "README.md"
-      - "docs/modules"
-      - "docs/reference"
-      - ".stagefreight/badges"
+      - ".stagefreight/scribe"
     push: true
-    # StageFreight's own docs are project metadata, not build inputs (the image
-    # is built from src/ only — README/docs are never copied in), so the docs
-    # auto-commit is synchronization output, not new source intent. Marking it
-    # skip-ci keeps it from entering the lifecycle and spawning a follow-up
-    # pipeline that auto-cancels the narrate which produced it. (Repos that ship docs IN
-    # the image — e.g. FAIRER-pages — keep this false: there a docs change is a
-    # real build input.) Broader X-StageFreight-Generated-keyed policy is TODO.
     skip_ci: true
