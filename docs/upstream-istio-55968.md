@@ -161,3 +161,102 @@ re-enrollment without killing the pod), or `kubectl rollout restart daemonset
 istio-cni-node` (re-reconciles on startup, but inherits the same bug for any pod
 it still can't relocate). Detection requires the **netns** check above —
 `workloadState` will not reveal these orphans.
+
+## Maintainer position, and why it does not close this
+
+Both issues are **closed by the lifecycle bot for inactivity**, not by a fix —
+`state_reason: completed` is the bot's closure, not a resolution. The substantive
+maintainer position is:
+
+- [keithmattix, 2026-03-25](https://github.com/istio/istio/issues/55968#issuecomment-4126779952):
+  "Istio owned CNI is the best option I think we have in Kubernetes. They plus
+  reconcile iptables on startup (owned by default) pretty much cover this issue I
+  think"
+- Sridharpage, 2026-06-10, replying directly to this report: "you need to set
+  `istio-owned-cni-config` to `true` on `istio-cni`. This enables a separate,
+  Istio-owned CNI configuration file that persists across node reboots. Even if a
+  pod is missed during the initial iptables reconciliation because its network
+  namespace (netns) isn't ready yet, the configuration ensures that when the pod
+  does come up, it is properly handed over to the Istio CNI plugin."
+
+### The mechanism gap
+
+Both answers are correct about a **different** failure mode than the one reported
+here. The thread's centre of gravity is the CNI-config race howardjohn described
+in the first comment: the primary CNI overwrites the conflist on boot, istio-cni
+has not restarted yet, and sandboxes created in that window never invoke the Istio
+plugin. An Istio-owned conflist that survives reboot genuinely does fix that,
+because it is present when those sandboxes are created.
+
+It does not reach this bug, because the two act on disjoint sets of pods:
+
+| mechanism | acts on |
+| --------- | ------- |
+| Istio-owned CNI config | pods whose **sandbox is created** while the config exists |
+| startup reconciliation | pods that **already exist** at istio-cni startup |
+
+A pod that *survived* the reboot has no sandbox creation after it. The CNI plugin
+is never invoked for it again, so conflist ownership is irrelevant to it by
+construction. Reconciliation is its only path back into the mesh — and the defect
+is *inside* that path: `reconcileExistingPod` receives `ErrPodNotFound` from
+`getNetns`, reads it as "new pod, CNI will handle it", and returns success. So
+"reconcile iptables on startup" does not cover the case; it is the component that
+drops it.
+
+The distinction was raised in-thread and never answered.
+[Sridharpage, 2025-08-12](https://github.com/istio/istio/issues/55968) asked
+precisely this — "Are you suggesting that some of these missed pods might not have
+a process ID in /proc during reconciliation, and therefore could be skipped
+entirely?" — and the reply, two months later, was "No, I believe I was referring
+to the mesh bypass period before reconciliation." The skip path itself was never
+analysed.
+
+### Measured, with both prescribed mitigations already enabled
+
+This is not a configuration gap. The cluster carrying this workaround already runs
+exactly what the maintainers prescribe:
+
+```
+ISTIO_OWNED_CNI_CONFIG:                  "true"
+AMBIENT_RECONCILE_POD_RULES_ON_STARTUP:  "true"
+```
+
+With both true, meshmedic repaired **7 genuine orphans in 24 hours** — among them
+two CNPG replicas, Vaultwarden's database and Nextcloud's database — each restored
+only by forcing fresh enrollment. So the prescription is in place and is
+empirically insufficient on this topology (ambient, Cilium-chained).
+
+Note also that `REPAIR_ENABLED`/`REPAIR_REPAIR_PODS` do not apply: that repair
+controller keys off `REPAIR_INIT_CONTAINER_NAME: istio-validation`, a **sidecar**
+-mode artefact. Ambient pods have no such init container, so nothing in istio-cni
+looks for the state described here.
+
+### Why this remains useful in an Istio environment
+
+1. **It detects a state nothing upstream looks at.** The orphan keeps its
+   `ambient.istio.io/redirection: enabled` annotation and stays in ztunnel's
+   `workloadState`, so every control-plane signal reports healthy. Only reading the
+   pod's own netns for ztunnel's listeners reveals it. No upstream component
+   performs that check.
+2. **Maintainers concede a residual window by design.** keithmattix, on what the
+   in-flight PR would claim: "best effort to prevent mesh breakouts but that
+   they're still just as possible until the underlying design is addressed", and
+   the CNI-spec change that would close it
+   ([containernetworking/cni#1052](https://github.com/containernetworking/cni/pull/1052))
+   was confirmed in-thread not to solve the tmpfs variant. A best-effort mechanism
+   is the right place for a second, independent check.
+3. **The security invariant deserves defence in depth.** "Traffic must not bypass
+   the mesh" is exactly the sort of property that should not rest on one
+   best-effort path — a silent bypass is worse than a loud failure, and this one is
+   silent by construction.
+4. **It is conservative in practice.** Detection is noisy and confirmation is what
+   makes it safe: over the same 24 hours, 1,318 detections resolved to
+   `confirm=captured` and 16 to `confirm=pid_missing` against those 7 repairs. It
+   acts on roughly 0.5% of what it notices, so it is a narrow safety net rather
+   than a restart loop.
+5. **Adjacent reports remain open in practice.** robbo10, 2025-09-30: the taint
+   controller does not help when istio-cni crashes on startup after the taint has
+   already been removed — another route into the same end state.
+
+The correct end state is still the upstream fix sketched above; this repo is a
+workaround with a measured reason to exist, not a preference.
