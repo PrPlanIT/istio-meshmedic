@@ -1,6 +1,6 @@
 module github.com/PrPlanIT/istio-meshmedic
 
-go 1.26.10
+go 1.27.3
 
 require (
 	github.com/prometheus/client_golang v1.24.1
